@@ -189,10 +189,13 @@ def index_color_images(*roots: str | Path) -> dict[str, list[Path]]:
                 continue
             by_subject.setdefault(subject, []).append(path)
     for subject in by_subject:
-        by_subject[subject] = sorted(
-            set(by_subject[subject]),
-            key=lambda p: (p.name.lower(), str(p)),
-        )
+        # If a user keeps both an extracted package in Drive and the original
+        # archive, extraction to /content can expose the same camera image twice.
+        # Deduplicate by camera filename so repeated copies cannot consume view slots.
+        deduped: dict[str, Path] = {}
+        for path in sorted(by_subject[subject], key=lambda p: (p.name.lower(), str(p))):
+            deduped.setdefault(path.name.lower(), path)
+        by_subject[subject] = list(deduped.values())
     return by_subject
 
 

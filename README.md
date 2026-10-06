@@ -42,46 +42,94 @@ Persistent output:
 
 `MyDrive/head_model/headscan-lite-headspace/`
 
-## Headspace / LYHM setup
+## Request-free MakeHuman synthetic setup
 
-The Colab notebook now uses **Headspace / LYHM as its primary real dataset**.
-Obtain the licensed packages from the University of York Headspace/LYHM
-distribution and place the archives, or their extracted folders, anywhere under:
+The Colab notebook now uses **MakeHuman core assets as its primary training
+source**. There is no dataset request, university approval, account, API key or
+manual archive download.
 
-`MyDrive/head_model/headspace/`
+At first run the notebook sparse-clones only these parts of the official
+MakeHuman repository:
 
-For the current trainer request these two packages:
+```text
+makehuman/data/3dobjs/
+makehuman/data/targets/
+LICENSE.md
+```
 
-1. **Headspace FLAME registrations** — registered OBJ meshes + FLAME parameters.
-2. **Headspace 3dMD package** — raw PNG camera images + TKA calibration data.
+The generator uses the base mesh and core morph targets only. It does not import
+MakeHuman application code and does not use third-party community assets.
 
-The converter automatically:
+Default generation:
 
-- finds `registrations/<actor_id>/*.obj`,
-- finds subject-matched `*C.png` color-camera images such as
-  `00001/1C.png` and `00001/2C.png`,
-- ignores IR/TKA files during this first training stage,
-- converts registered geometry to millimetres,
-- verifies identical topology across subjects,
-- makes deterministic train/validation splits,
-- letterboxes RGB inputs to a consistent resolution, and
-- caches the prepared dataset at
-  `MyDrive/head_model/headspace_prepared_v1.zip`.
+```text
+2,500 synthetic identities
+× 8 views per identity
+= 20,000 RGB training views
+```
 
-The first run can therefore work directly from the original licensed downloads;
-later free-Colab sessions restore the much smaller prepared cache before
-resuming training.
+For each identity it creates:
 
-Headspace/LYHM is distributed for **non-commercial research and education**
-under its own agreement. This repository does not download or redistribute the
-dataset itself.
+- a fixed-topology registered head mesh,
+- an exact metric vertex target,
+- 8 camera views around the head,
+- exact yaw/pitch labels,
+- foreground masks,
+- randomized macro head shape,
+- randomized head/face morph targets,
+- randomized skin tone,
+- randomized lighting and backgrounds,
+- procedural hair occlusion,
+- camera distance/focal variation,
+- blur, sensor noise and JPEG degradation.
 
-If no licensed Headspace folder is found, the notebook runs a **tiny procedural
-smoke test** only to verify setup/checkpoint/export. Those weights are not a
-usable head scanner.
+The generated cache is stored in Drive using the generation settings in its
+filename, for example:
 
-The generic manifest format remains supported for other licensed datasets; see
-[docs/dataset-format.md](docs/dataset-format.md).
+`MyDrive/head_model/makehuman_synth_v1_2500ids_8views_320px.zip`
+
+Later Colab sessions restore this prepared cache locally rather than generating
+the dataset again.
+
+Persistent training outputs go to:
+
+`MyDrive/head_model/headscan-lite-makehuman-2500/`
+
+The packaged mobile output includes:
+
+```text
+headscan_lite.onnx
+head_faces.npy
+shape_basis.npz
+best.pt
+last.pt
+metrics.jsonl
+```
+
+`headscan_lite.onnx` predicts the registered metric vertices. `head_faces.npy`
+contains the fixed triangle topology required to turn those vertices into a
+renderable mesh.
+
+The default MobileNet backbone trains from scratch. This avoids making the
+request-free training path depend on ImageNet-derived pretrained weights. Set
+`USE_PRETRAINED_BACKBONE = True` in the Colab script only if you deliberately
+want that initialization.
+
+MakeHuman documents its core base mesh, targets, skins and related core assets
+as **CC0**. The generator records the exact MakeHuman source commit used for the
+cached dataset. Third-party MakeHuman community assets are intentionally not
+used.
+
+This is still **synthetic pretraining**. It solves the dataset-access problem
+and provides exact 3D supervision, but performance on phone photographs must be
+validated independently on real heads.
+
+### Optional Headspace support
+
+The earlier Headspace/LYHM converter remains in
+`src/head_model/headspace.py`. It can still be used for non-commercial
+academic experiments if you later obtain those files, but it is no longer
+required by the default Colab flow.
 
 ## Dataset requirement
 
@@ -157,10 +205,10 @@ L =
 + 0.25 * confidence BCE
 ```
 
-For **Headspace/LYHM**, Colab uses `--geometry-only-training`: only the
-coefficient and metric-vertex terms are evaluated, and the dense
-normal/depth/mask/confidence heads are skipped. This is both more faithful to
-the licensed source data and substantially cheaper on a free Colab GPU.
+For the default **MakeHuman synthetic** dataset, exact mask targets are also
+available, so the normal training path uses geometry plus mask/confidence
+auxiliary supervision. Depth and normal losses automatically remain zero when
+those optional maps are absent.
 
 Validation reports explicit geometry error:
 
@@ -237,8 +285,9 @@ python -m head_model.train \
 
 ## Recommended real training data
 
-Headspace/LYHM is the default starting point for this repository. For additional
-or replacement datasets, prioritize data with:
+MakeHuman synthetic generation is the default starting point for this
+repository. For real-world fine-tuning or benchmark datasets, prioritize data
+with:
 
 1. true full-head coverage rather than face-only crops,
 2. registered topology across identities,

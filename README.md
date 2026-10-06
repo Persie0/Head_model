@@ -279,8 +279,7 @@ python -m head_model.train \
   --image-size 256 \
   --max-views 8 \
   --epochs 60 \
-  --batch-size 2 \
-  --geometry-only-training
+  --batch-size 2
 ```
 
 ## Recommended real training data

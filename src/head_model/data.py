@@ -65,11 +65,46 @@ def build_shape_basis(
 
     x = np.stack(meshes, axis=0)
     mean = x.mean(axis=0, keepdims=True)
-    flat = (x - mean).reshape(len(x), -1)
+    flat = (x - mean).reshape(len(x), -1).astype(np.float32, copy=False)
     max_components = max(1, min(int(components), len(x) - 1, flat.shape[1]))
-    _, singular, vh = np.linalg.svd(flat, full_matrices=False)
-    comp_flat = vh[:max_components].astype(np.float32)
-    coeff = flat @ comp_flat.T
+
+    # Full SVD becomes unnecessarily expensive for thousands of synthetic
+    # identities. On Colab use PyTorch's truncated randomized PCA and the GPU
+    # when available. Tiny datasets retain exact NumPy SVD for test stability.
+    if len(x) >= 256 and max_components < min(flat.shape):
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        q = min(min(flat.shape), max_components + min(16, max_components))
+        print(
+            f"[basis] randomized PCA | samples={len(x)} | features={flat.shape[1]} | "
+            f"components={max_components} | device={device}",
+            flush=True,
+        )
+        torch.manual_seed(42)
+        matrix = torch.from_numpy(flat).to(device)
+        with torch.no_grad():
+            _, singular_t, vectors = torch.pca_lowrank(
+                matrix,
+                q=q,
+                center=False,
+                niter=3,
+            )
+        comp_flat = (
+            vectors[:, :max_components]
+            .T.contiguous()
+            .cpu().numpy()
+            .astype(np.float32)
+        )
+        singular = singular_t[:max_components].cpu().numpy().astype(np.float32)
+        coeff = (matrix @ vectors[:, :max_components]).cpu().numpy()
+        del matrix, vectors, singular_t
+        if device.type == "cuda":
+            torch.cuda.empty_cache()
+    else:
+        _, singular, vh = np.linalg.svd(flat, full_matrices=False)
+        comp_flat = vh[:max_components].astype(np.float32)
+        singular = singular[:max_components].astype(np.float32)
+        coeff = flat @ comp_flat.T
+
     coeff_std = coeff.std(axis=0).astype(np.float32)
     coeff_std = np.maximum(coeff_std, 1e-4)
     output_path = Path(output_path)

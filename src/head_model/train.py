@@ -459,6 +459,7 @@ def train(args: argparse.Namespace) -> dict[str, float]:
             weights=weights,
             vertex_scale_mm=args.vertex_scale_mm,
             progress_every=args.progress_every,
+            geometry_only=args.geometry_only_training,
         )
         scheduler.step()
         elapsed = time.perf_counter() - epoch_started

@@ -181,6 +181,41 @@ def _extract_head_topology(
             f"Head subset unexpectedly small: {len(head_indices)} vertices, "
             f"{len(head_faces)} triangles"
         )
+
+    # MakeHuman's base OBJ contains helper geometry as well as the body. Keep the
+    # largest vertex-connected surface so detached helpers cannot enter the scan
+    # topology merely because a facial target happens to reference them.
+    used_pre = np.unique(head_faces.reshape(-1))
+    parent = np.arange(len(head_indices), dtype=np.int32)
+
+    def find(value: int) -> int:
+        while parent[value] != value:
+            parent[value] = parent[parent[value]]
+            value = int(parent[value])
+        return value
+
+    def union(a: int, b: int) -> None:
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[rb] = ra
+
+    for a, b, d in head_faces:
+        union(int(a), int(b))
+        union(int(b), int(d))
+
+    component_sizes: dict[int, int] = {}
+    for value in used_pre:
+        root = find(int(value))
+        component_sizes[root] = component_sizes.get(root, 0) + 1
+    largest_root = max(component_sizes, key=component_sizes.get)
+    largest_vertices = np.asarray(
+        [int(value) for value in used_pre if find(int(value)) == largest_root],
+        dtype=np.int32,
+    )
+    in_largest = np.zeros(len(head_indices), dtype=bool)
+    in_largest[largest_vertices] = True
+    head_faces = head_faces[in_largest[head_faces].all(axis=1)]
+
     used = np.unique(head_faces.reshape(-1))
     compact_map = np.full(len(head_indices), -1, dtype=np.int32)
     compact_map[used] = np.arange(len(used), dtype=np.int32)

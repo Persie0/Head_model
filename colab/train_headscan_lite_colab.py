@@ -464,6 +464,11 @@ def train_and_export(dataset_root: Path) -> tuple[Path, Path | None]:
         cwd=REPO,
     )
 
+    topology_source = dataset_root / "head_faces.npy"
+    if topology_source.is_file():
+        shutil.copy2(topology_source, REAL_RUN_DIR / "head_faces.npy")
+        print(f"Head topology: {REAL_RUN_DIR / 'head_faces.npy'}", flush=True)
+
     onnx_path = REAL_RUN_DIR / "headscan_lite.onnx"
     try:
         run([

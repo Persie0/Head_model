@@ -58,40 +58,50 @@ def compute_losses(
         target_vertices / vertex_scale_mm,
     )
 
-    normal_target = batch["normal"]
-    normal_dot = (output["normal"] * normal_target).sum(dim=2).clamp(-1.0, 1.0)
-    normal_valid = batch["normal_valid"].unsqueeze(-1).unsqueeze(-1)
-    if "mask_valid" in batch:
-        supervised_mask = torch.where(
-            batch["mask_valid"].unsqueeze(-1).unsqueeze(-1),
-            batch["mask"][:, :, 0] > 0.5,
-            torch.ones_like(batch["mask"][:, :, 0], dtype=torch.bool),
+    zero = coeff_loss.new_zeros(())
+    normal_loss = zero
+    depth_loss = zero
+    mask_loss = zero
+    confidence_loss = zero
+
+    # Headspace/LYHM training can run geometry-only because its licensed 3dMD
+    # package supplies RGB views + registered FLAME targets, not our custom
+    # dense supervision maps. Generic datasets may still provide them.
+    if "normal" in output:
+        normal_target = batch["normal"]
+        normal_dot = (output["normal"] * normal_target).sum(dim=2).clamp(-1.0, 1.0)
+        normal_valid = batch["normal_valid"].unsqueeze(-1).unsqueeze(-1)
+        if "mask_valid" in batch:
+            supervised_mask = torch.where(
+                batch["mask_valid"].unsqueeze(-1).unsqueeze(-1),
+                batch["mask"][:, :, 0] > 0.5,
+                torch.ones_like(batch["mask"][:, :, 0], dtype=torch.bool),
+            )
+            normal_valid = normal_valid & supervised_mask
+        normal_loss = masked_mean(1.0 - normal_dot, normal_valid)
+
+        depth_valid = batch["depth_valid"].unsqueeze(-1).unsqueeze(-1).unsqueeze(-1)
+        depth_pixel_valid = depth_valid & (batch["depth"] > 0)
+        depth_loss = masked_mean(
+            torch.abs(output["depth"] - batch["depth"]),
+            depth_pixel_valid,
         )
-        normal_valid = normal_valid & supervised_mask
-    normal_loss = masked_mean(1.0 - normal_dot, normal_valid)
 
-    depth_valid = batch["depth_valid"].unsqueeze(-1).unsqueeze(-1).unsqueeze(-1)
-    depth_pixel_valid = depth_valid & (batch["depth"] > 0)
-    depth_loss = masked_mean(
-        torch.abs(output["depth"] - batch["depth"]),
-        depth_pixel_valid,
-    )
+        mask_bce = torch.nn.functional.binary_cross_entropy_with_logits(
+            output["mask_logits"],
+            batch["mask"],
+            reduction="none",
+        )
+        mask_valid = batch["mask_valid"].unsqueeze(-1).unsqueeze(-1).unsqueeze(-1)
+        mask_loss = masked_mean(mask_bce, mask_valid)
 
-    mask_bce = torch.nn.functional.binary_cross_entropy_with_logits(
-        output["mask_logits"],
-        batch["mask"],
-        reduction="none",
-    )
-    mask_valid = batch["mask_valid"].unsqueeze(-1).unsqueeze(-1).unsqueeze(-1)
-    mask_loss = masked_mean(mask_bce, mask_valid)
-
-    conf_bce = torch.nn.functional.binary_cross_entropy_with_logits(
-        output["confidence_logits"],
-        batch["confidence"],
-        reduction="none",
-    )
-    conf_valid = batch["confidence_valid"].unsqueeze(-1).unsqueeze(-1).unsqueeze(-1)
-    confidence_loss = masked_mean(conf_bce, conf_valid)
+        conf_bce = torch.nn.functional.binary_cross_entropy_with_logits(
+            output["confidence_logits"],
+            batch["confidence"],
+            reduction="none",
+        )
+        conf_valid = batch["confidence_valid"].unsqueeze(-1).unsqueeze(-1).unsqueeze(-1)
+        confidence_loss = masked_mean(conf_bce, conf_valid)
 
     total = (
         weights["coeff"] * coeff_loss
@@ -117,6 +127,21 @@ def move_batch(batch: dict, device: torch.device) -> dict:
     return {
         key: value.to(device, non_blocking=True) if torch.is_tensor(value) else value
         for key, value in batch.items()
+    }
+
+
+def forward_batch(model: HeadScanLite, batch: dict, *, geometry_only: bool) -> dict[str, torch.Tensor]:
+    if not geometry_only:
+        return model(batch["images"], batch["view_angles"], batch["view_valid"])
+    vertices, coeff_norm, view_quality = model.forward_geometry(
+        batch["images"],
+        batch["view_angles"],
+        batch["view_valid"],
+    )
+    return {
+        "vertices": vertices,
+        "coeff_norm": coeff_norm,
+        "view_quality": view_quality,
     }
 
 
@@ -149,6 +174,7 @@ def evaluate(
     vertex_scale_mm: float,
     progress_every: int,
     label: str = "validation",
+    geometry_only: bool = False,
 ) -> dict[str, float]:
     model.eval()
     totals: dict[str, float] = {}
@@ -157,11 +183,7 @@ def evaluate(
     started = time.perf_counter()
     for batch_index, batch in enumerate(loader, 1):
         batch = move_batch(batch, device)
-        output = model(
-            batch["images"],
-            batch["view_angles"],
-            batch["view_valid"],
-        )
+        output = forward_batch(model, batch, geometry_only=geometry_only)
         _, pieces = compute_losses(
             output,
             batch,
@@ -220,6 +242,7 @@ def save_checkpoint(
                 "depth_scale_mm": args.depth_scale_mm,
                 "vertex_scale_mm": args.vertex_scale_mm,
                 "basis_path": str(args.basis_path),
+                "geometry_only_training": bool(args.geometry_only_training),
             },
         },
         path,
@@ -356,7 +379,8 @@ def train(args: argparse.Namespace) -> dict[str, float]:
     )
     print(
         f"[setup] parameters={params/1e6:.2f}M | "
-        f"trainable={trainable/1e6:.2f}M | AMP={amp_enabled}",
+        f"trainable={trainable/1e6:.2f}M | AMP={amp_enabled} | "
+        f"geometry-only={args.geometry_only_training}",
         flush=True,
     )
     print(f"[setup] outputs={output_dir}", flush=True)
@@ -387,10 +411,10 @@ def train(args: argparse.Namespace) -> dict[str, float]:
                 device_type=device.type,
                 enabled=amp_enabled,
             ):
-                output = model(
-                    batch["images"],
-                    batch["view_angles"],
-                    batch["view_valid"],
+                output = forward_batch(
+                    model,
+                    batch,
+                    geometry_only=args.geometry_only_training,
                 )
                 loss, _ = compute_losses(
                     output,
@@ -587,6 +611,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--resume", type=Path)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--pretrained-backbone", action="store_true")
+    parser.add_argument(
+        "--geometry-only-training",
+        action="store_true",
+        help=(
+            "Skip dense normal/depth/mask/confidence heads during training. "
+            "Recommended for Headspace/LYHM, which supplies registered FLAME "
+            "geometry plus RGB camera views but not these custom dense targets."
+        ),
+    )
     parser.add_argument(
         "--no-amp",
         dest="amp",

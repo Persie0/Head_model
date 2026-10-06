@@ -40,28 +40,48 @@ The notebook follows the same pattern as the `resistor_model` Colab trainers:
 
 Persistent output:
 
-`MyDrive/head_model/headscan-lite/`
+`MyDrive/head_model/headscan-lite-headspace/`
 
-Recommended dataset archive:
+## Headspace / LYHM setup
 
-`MyDrive/head_model/headscan_dataset.zip`
+The Colab notebook now uses **Headspace / LYHM as its primary real dataset**.
+Obtain the licensed packages from the University of York Headspace/LYHM
+distribution and place the archives, or their extracted folders, anywhere under:
 
-The archive should extract to a directory containing `train.jsonl` and
-`valid.jsonl`.
+`MyDrive/head_model/headspace/`
 
-If no real dataset is found, the Colab recipe creates a **tiny procedural smoke
-dataset** and runs a short end-to-end test. The notebook prints a large warning:
-that synthetic data is only for verifying the pipeline and does **not** produce
-a useful real-world head scanner.
+For the current trainer request these two packages:
 
-## Why there is no automatic FaceScape download
+1. **Headspace FLAME registrations** — registered OBJ meshes + FLAME parameters.
+2. **Headspace 3dMD package** — raw PNG camera images + TKA calibration data.
 
-High-quality head-scan datasets commonly require registration, institutional
-access, non-commercial terms, or redistribution restrictions. This repository
-therefore does not silently download or redistribute one of them.
+The converter automatically:
 
-Use scans that you are licensed to train on and convert them to the neutral
-registered-head manifest described in [docs/dataset-format.md](docs/dataset-format.md).
+- finds `registrations/<actor_id>/*.obj`,
+- finds subject-matched `*C.png` color-camera images such as
+  `00001/1C.png` and `00001/2C.png`,
+- ignores IR/TKA files during this first training stage,
+- converts registered geometry to millimetres,
+- verifies identical topology across subjects,
+- makes deterministic train/validation splits,
+- letterboxes RGB inputs to a consistent resolution, and
+- caches the prepared dataset at
+  `MyDrive/head_model/headspace_prepared_v1.zip`.
+
+The first run can therefore work directly from the original licensed downloads;
+later free-Colab sessions restore the much smaller prepared cache before
+resuming training.
+
+Headspace/LYHM is distributed for **non-commercial research and education**
+under its own agreement. This repository does not download or redistribute the
+dataset itself.
+
+If no licensed Headspace folder is found, the notebook runs a **tiny procedural
+smoke test** only to verify setup/checkpoint/export. Those weights are not a
+usable head scanner.
+
+The generic manifest format remains supported for other licensed datasets; see
+[docs/dataset-format.md](docs/dataset-format.md).
 
 ## Dataset requirement
 
@@ -125,7 +145,7 @@ single-view completion and genuine multi-view refinement.
 
 ## Training objective
 
-The default objective is:
+For generic datasets with dense supervision, the default objective is:
 
 ```text
 L =
@@ -136,6 +156,11 @@ L =
 + 0.50 * silhouette BCE
 + 0.25 * confidence BCE
 ```
+
+For **Headspace/LYHM**, Colab uses `--geometry-only-training`: only the
+coefficient and metric-vertex terms are evaluated, and the dense
+normal/depth/mask/confidence heads are skipped. This is both more faithful to
+the licensed source data and substantially cheaper on a free Colab GPU.
 
 Validation reports explicit geometry error:
 
@@ -206,12 +231,14 @@ python -m head_model.train \
   --image-size 256 \
   --max-views 8 \
   --epochs 60 \
-  --batch-size 2
+  --batch-size 2 \
+  --geometry-only-training
 ```
 
 ## Recommended real training data
 
-For a high-quality model, prioritize data with:
+Headspace/LYHM is the default starting point for this repository. For additional
+or replacement datasets, prioritize data with:
 
 1. true full-head coverage rather than face-only crops,
 2. registered topology across identities,

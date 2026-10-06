@@ -56,17 +56,6 @@ def _subject_id(path: Path) -> str | None:
     return None
 
 
-def _archive_members(path: Path) -> list[str]:
-    name = path.name.lower()
-    if name.endswith(".zip"):
-        with zipfile.ZipFile(path) as archive:
-            return archive.namelist()
-    if name.endswith((".tar", ".tar.gz", ".tgz")):
-        with tarfile.open(path, "r:*") as archive:
-            return [member.name for member in archive.getmembers()]
-    return []
-
-
 def _wanted_member(name: str) -> bool:
     normalized = name.replace("\\", "/")
     lower = normalized.lower()
@@ -92,9 +81,8 @@ def extract_relevant_headspace_archives(
 ) -> dict[str, int]:
     """Extract only FLAME registration OBJs and 3dMD color-camera images.
 
-    The official packages are large. We deliberately skip raw IR/TKA data and any
-    full raw Headspace mesh archive; the trainer only needs registered targets and
-    RGB camera views.
+    ZIP archives are indexed before extraction. TAR/TAR.GZ archives are handled
+    in one streaming pass so a 30+ GB source is not decompressed twice.
     """
     source_dir = Path(source_dir)
     output_dir = Path(output_dir)
@@ -108,47 +96,69 @@ def extract_relevant_headspace_archives(
     used_archives = 0
 
     for archive_path in sorted(archives):
-        members = _archive_members(archive_path)
-        wanted = [name for name in members if _wanted_member(name)]
-        if not wanted:
-            continue
-        used_archives += 1
-        print(
-            f"[headspace] {archive_path.name}: extracting {len(wanted)} relevant files",
-            flush=True,
-        )
         lower_name = archive_path.name.lower()
         if lower_name.endswith(".zip"):
             with zipfile.ZipFile(archive_path) as archive:
-                for index, name in enumerate(wanted, 1):
-                    target = _safe_target(output_dir, name)
+                wanted = [
+                    info for info in archive.infolist()
+                    if not info.is_dir() and _wanted_member(info.filename)
+                ]
+                if not wanted:
+                    continue
+                used_archives += 1
+                print(
+                    f"[headspace] {archive_path.name}: extracting "
+                    f"{len(wanted)} relevant files",
+                    flush=True,
+                )
+                for index, info in enumerate(wanted, 1):
+                    target = _safe_target(output_dir, info.filename)
                     target.parent.mkdir(parents=True, exist_ok=True)
-                    with archive.open(name) as src, target.open("wb") as dst:
+                    with archive.open(info) as src, target.open("wb") as dst:
                         shutil.copyfileobj(src, dst, length=8 * 1024 * 1024)
                     extracted += 1
                     if index % 100 == 0 or index == len(wanted):
                         print(
-                            f"[headspace] {archive_path.name}: {index}/{len(wanted)}",
+                            f"[headspace] {archive_path.name}: "
+                            f"{index}/{len(wanted)}",
                             flush=True,
                         )
-        else:
-            wanted_set = set(wanted)
-            with tarfile.open(archive_path, "r:*") as archive:
-                selected = [m for m in archive if m.name in wanted_set and m.isfile()]
-                for index, member in enumerate(selected, 1):
-                    target = _safe_target(output_dir, member.name)
-                    target.parent.mkdir(parents=True, exist_ok=True)
-                    src = archive.extractfile(member)
-                    if src is None:
-                        continue
-                    with src, target.open("wb") as dst:
-                        shutil.copyfileobj(src, dst, length=8 * 1024 * 1024)
-                    extracted += 1
-                    if index % 100 == 0 or index == len(selected):
-                        print(
-                            f"[headspace] {archive_path.name}: {index}/{len(selected)}",
-                            flush=True,
-                        )
+            continue
+
+        matched = 0
+        with tarfile.open(archive_path, "r:*") as archive:
+            for member in archive:
+                if not member.isfile() or not _wanted_member(member.name):
+                    continue
+                if matched == 0:
+                    used_archives += 1
+                    print(
+                        f"[headspace] {archive_path.name}: "
+                        "streaming relevant files from TAR archive",
+                        flush=True,
+                    )
+                target = _safe_target(output_dir, member.name)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                src = archive.extractfile(member)
+                if src is None:
+                    continue
+                with src, target.open("wb") as dst:
+                    shutil.copyfileobj(src, dst, length=8 * 1024 * 1024)
+                matched += 1
+                extracted += 1
+                if matched % 100 == 0:
+                    print(
+                        f"[headspace] {archive_path.name}: "
+                        f"{matched} relevant files extracted",
+                        flush=True,
+                    )
+        if matched:
+            print(
+                f"[headspace] {archive_path.name}: "
+                f"{matched} relevant files extracted",
+                flush=True,
+            )
+
     return {"archives": used_archives, "files": extracted}
 
 

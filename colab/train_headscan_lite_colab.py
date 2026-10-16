@@ -34,7 +34,7 @@ import zipfile
 
 HEADSCAN_COLAB_VERSION = "2026-10-16-v5-progress-cache"
 # Kept so already-open v3 notebook bootstrap cells accept this compatible update.
-COLAB_COMPATIBILITY_TOKENS = ("v3-makehuman",)
+COLAB_COMPATIBILITY_TOKENS = ("v3-makehuman", "v4-makehuman-import-fix")
 
 # Free-Colab-oriented defaults. Increase SYNTH_IDENTITIES on later runs after
 # validating the pipeline. Changing it automatically uses a different cache.

@@ -24,6 +24,8 @@ from pathlib import Path
 import importlib
 import importlib.util
 import json
+import queue
+import threading
 import shutil
 import subprocess
 import sys
@@ -54,7 +56,7 @@ EPOCHS = 35
 BATCH_SIZE = 2
 PROGRESS_EVERY = 1
 CHECKPOINT_EVERY = 5
-HEARTBEAT_SECONDS = 5
+HEARTBEAT_SECONDS = 30
 
 # False is the cleanest licensing path: the model learns entirely from the CC0
 # MakeHuman-derived synthetic dataset. Set True only if you intentionally want
@@ -91,28 +93,82 @@ def run_with_heartbeat(
     cwd: Path | None = None,
     heartbeat_seconds: float = HEARTBEAT_SECONDS,
 ) -> None:
+    """Stream child output immediately, and diagnose genuinely silent stages.
+
+    Unlike Popen with inherited output, this relays the trainer's individual
+    lines through the active notebook process. Heartbeat resets after every
+    real trainer line instead of printing useless five-second repetitions.
+    """
     print("+", " ".join(map(str, command)), flush=True)
     started = time.monotonic()
     process = subprocess.Popen(
         command,
         cwd=str(cwd) if cwd else None,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
     )
-    next_heartbeat = started + max(1.0, heartbeat_seconds)
+    output: queue.Queue[str | None] = queue.Queue()
+
+    def reader() -> None:
+        assert process.stdout is not None
+        try:
+            for line in process.stdout:
+                output.put(line.rstrip("\n"))
+        finally:
+            output.put(None)
+
+    thread = threading.Thread(target=reader, daemon=True)
+    thread.start()
+    last_line_at = started
+    last_stage = "waiting for process to emit first line"
+    interval = max(5.0, float(heartbeat_seconds))
+    next_heartbeat = started + interval
+
     while True:
-        code = process.poll()
-        if code is not None:
-            if code != 0:
-                raise subprocess.CalledProcessError(code, command)
-            return
+        try:
+            item = output.get(timeout=0.5)
+        except queue.Empty:
+            item = False
+
+        if item is None:
+            break
+        if item is not False:
+            print(item, flush=True)
+            last_line_at = time.monotonic()
+            if item.strip():
+                last_stage = str(item).strip()[:160]
+            next_heartbeat = last_line_at + interval
+
         now = time.monotonic()
-        if now >= next_heartbeat:
+        if now >= next_heartbeat and process.poll() is None:
+            rss = "?"
+            try:
+                status_file = Path(f"/proc/{process.pid}/status")
+                for line in status_file.read_text(encoding="utf-8").splitlines():
+                    if line.startswith("VmRSS:"):
+                        rss = line.partition(":")[2].strip()
+                        break
+            except OSError:
+                pass
             print(
-                f"[trainer] process alive | waiting for next trainer log line | "
-                f"elapsed {now-started:.0f}s",
+                f"[trainer-heartbeat] no child output for "
+                f"{now-last_line_at:.0f}s | elapsed {(now-started)/60:.1f}m | "
+                f"pid={process.pid} | RAM={rss} | last: {last_stage}",
                 flush=True,
             )
-            next_heartbeat = now + max(1.0, heartbeat_seconds)
-        time.sleep(0.5)
+            next_heartbeat = now + interval
+
+    code = process.wait()
+    thread.join(timeout=2)
+    if code:
+        raise subprocess.CalledProcessError(code, command)
+    print(
+        f"[trainer] process completed successfully in "
+        f"{(time.monotonic()-started)/60:.1f} min",
+        flush=True,
+    )
 
 
 def copy_with_progress(source: Path, destination: Path, label: str) -> None:
@@ -640,7 +696,7 @@ def print_run_configuration(
     print(f"  complete data cache: {MAKEHUMAN_CACHE_ZIP}", flush=True)
     print(f"  partial data cache: {MAKEHUMAN_PARTIAL_ZIP}", flush=True)
     print(
-        f"  heartbeat: every {HEARTBEAT_SECONDS}s during silent trainer startup",
+        f"  heartbeat: every {HEARTBEAT_SECONDS}s of actual child silence",
         flush=True,
     )
     print(

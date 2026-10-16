@@ -32,9 +32,9 @@ import sys
 import time
 import zipfile
 
-HEADSCAN_COLAB_VERSION = "2026-10-16-v5-progress-cache"
+HEADSCAN_COLAB_VERSION = "2026-10-16-v6-onnx-export"
 # Kept so already-open v3 notebook bootstrap cells accept this compatible update.
-COLAB_COMPATIBILITY_TOKENS = ("v3-makehuman", "v4-makehuman-import-fix")
+COLAB_COMPATIBILITY_TOKENS = ("v3-makehuman", "v4-makehuman-import-fix", "v5-progress-cache")
 
 # Free-Colab-oriented defaults. Increase SYNTH_IDENTITIES on later runs after
 # validating the pipeline. Changing it automatically uses a different cache.
@@ -712,6 +712,47 @@ def print_run_configuration(
     print("", flush=True)
 
 
+def export_trained_checkpoint(checkpoint: Path, output: Path) -> bool:
+    """Stream ONNX export diagnostics to both Colab and a persistent log."""
+    log_path = output.parent / "onnx_export.log"
+    command = [
+        sys.executable, "-u", "-m", "head_model.export",
+        "--checkpoint", str(checkpoint), "--output", str(output),
+    ]
+    print("[export] converting existing best.pt; no training needed for export", flush=True)
+    print("+", " ".join(command), flush=True)
+    with log_path.open("w", encoding="utf-8") as log:
+        process = subprocess.Popen(
+            command,
+            cwd=str(REPO),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+        )
+        assert process.stdout is not None
+        for line in process.stdout:
+            print(line, end="", flush=True)
+            log.write(line)
+            log.flush()
+        code = process.wait()
+    if code != 0:
+        error_message = (
+            f"Export exited with code {code}. The complete traceback is saved "
+            f"in {log_path}. Run the standalone exporter again after updating "
+            "the repository; training checkpoints remain intact."
+        )
+        (output.parent / "onnx_export_error.txt").write_text(
+            error_message + "\n" + log_path.read_text(encoding="utf-8")[-16000:],
+            encoding="utf-8",
+        )
+        print(f"[export] ERROR: {error_message}", flush=True)
+        return False
+    (output.parent / "onnx_export_error.txt").unlink(missing_ok=True)
+    print(f"[export] validated model saved at {output}", flush=True)
+    return True
+
+
 def train_and_export(dataset_root: Path) -> tuple[Path, Path | None]:
     REAL_RUN_DIR.mkdir(parents=True, exist_ok=True)
     drive_resume = find_resume_checkpoint(REAL_RUN_DIR)
@@ -729,25 +770,7 @@ def train_and_export(dataset_root: Path) -> tuple[Path, Path | None]:
         print(f"Head topology: {REAL_RUN_DIR / 'head_faces.npy'}", flush=True)
 
     onnx_path = REAL_RUN_DIR / "headscan_lite.onnx"
-    try:
-        run([
-            sys.executable,
-            "-m",
-            "head_model.export",
-            "--checkpoint",
-            str(REAL_RUN_DIR / "best.pt"),
-            "--output",
-            str(onnx_path),
-        ], cwd=REPO)
-    except subprocess.CalledProcessError as exc:
-        (REAL_RUN_DIR / "onnx_export_error.txt").write_text(
-            str(exc),
-            encoding="utf-8",
-        )
-        print(
-            "[export] ONNX export failed; checkpoints and metrics remain safely in Drive.",
-            flush=True,
-        )
+    if not export_trained_checkpoint(REAL_RUN_DIR / "best.pt", onnx_path):
         onnx_path = None
 
     print(f"Best checkpoint: {REAL_RUN_DIR / 'best.pt'}", flush=True)

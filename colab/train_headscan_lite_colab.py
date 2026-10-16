@@ -331,9 +331,8 @@ def _restore_archive(source: Path, *, complete: bool) -> Path | None:
         copy_with_progress(source, local_zip, "dataset-cache-copy")
         started = time.monotonic()
         with zipfile.ZipFile(local_zip) as archive:
-            bad = archive.testzip()
-            if bad is not None:
-                raise zipfile.BadZipFile(f"CRC mismatch: {bad}")
+            # archive.extract validates CRC while writing, so avoid reading
+            # the entire 500 MiB ZIP once with testzip() before extracting.
             members = archive.infolist()
             total = len(members)
             for i, member in enumerate(members, 1):
@@ -487,11 +486,17 @@ def prepare_makehuman_dataset() -> Path:
     if cached is not None:
         return cached
 
-    source_root, commit = clone_makehuman_cc0_assets()
-    if LOCAL_PREPARED.exists():
-        shutil.rmtree(LOCAL_PREPARED)
-    LOCAL_PREPARED.mkdir(parents=True, exist_ok=True)
+    # If a Colab runtime was interrupted mid-generation, restore the latest
+    # safely-uploaded partial ZIP and continue from its per-identity records.
+    partial = restore_partial_cache()
+    if partial is not None:
+        print("[dataset-cache] continuing interrupted synthesis from partial ZIP", flush=True)
+    else:
+        if LOCAL_PREPARED.exists():
+            shutil.rmtree(LOCAL_PREPARED)
+        LOCAL_PREPARED.mkdir(parents=True, exist_ok=True)
 
+    source_root, commit = clone_makehuman_cc0_assets()
     from head_model.makehuman_synth import generate_makehuman_dataset
 
     print("", flush=True)
@@ -518,6 +523,8 @@ def prepare_makehuman_dataset() -> Path:
         validation_fraction=SYNTH_VALIDATION_FRACTION,
         seed=SYNTH_SEED,
         progress_every=25,
+        snapshot_every=SYNTH_SNAPSHOT_EVERY,
+        on_snapshot=save_partial_cache,
     )
     report["makehuman_commit"] = commit
     (LOCAL_PREPARED / "makehuman_generation.json").write_text(
@@ -628,7 +635,10 @@ def print_run_configuration(
         flush=True,
     )
     print(f"  pretrained MobileNet backbone: {USE_PRETRAINED_BACKBONE}", flush=True)
-    print(f"  progress: every {PROGRESS_EVERY} batch", flush=True)
+    print(f"  progress: every {PROGRESS_EVERY} training batch", flush=True)
+    print(f"  dataset snapshot: every {SYNTH_SNAPSHOT_EVERY} generated identities", flush=True)
+    print(f"  complete data cache: {MAKEHUMAN_CACHE_ZIP}", flush=True)
+    print(f"  partial data cache: {MAKEHUMAN_PARTIAL_ZIP}", flush=True)
     print(
         f"  heartbeat: every {HEARTBEAT_SECONDS}s during silent trainer startup",
         flush=True,

@@ -161,7 +161,9 @@ class HeadScanLite(nn.Module):
 
     @staticmethod
     def _angle_features(view_angles: torch.Tensor) -> torch.Tensor:
-        radians = torch.deg2rad(view_angles)
+        # Multiply by a constant instead of torch.deg2rad: opset-17 ONNX
+        # supports Mul but has no symbolic for aten::deg2rad.
+        radians = view_angles * (3.141592653589793 / 180.0)
         yaw = radians[..., 0]
         pitch = radians[..., 1]
         return torch.stack(

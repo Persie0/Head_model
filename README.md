@@ -258,6 +258,17 @@ This keeps the final output explicit, metric and cheap on mobile.
 
 ## Mobile export
 
+If you already finished the 35 training epochs, use the separate
+[export-only Colab notebook](colab/export_headscan_lite_colab.ipynb).
+It reads `best.pt` directly from Drive and does **not** restore the
+500 MiB training dataset or repeat training. It writes a portable opset-17
+ONNX graph and verifies ONNX Runtime matches PyTorch before reporting success.
+
+If ONNX export fails in the main Colab, detailed logs are saved in
+`MyDrive/head_model/headscan-lite-makehuman-2500/onnx_export.log`
+and `onnx_export_error.txt`. A failed export does not invalidate
+the existing `best.pt` checkpoint.
+
 After training:
 
 ```bash

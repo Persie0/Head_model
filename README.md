@@ -32,7 +32,7 @@ The notebook follows the same pattern as the `resistor_model` Colab trainers:
 - Google Drive mount,
 - visible setup/configuration prints,
 - batch-by-batch progress,
-- 5-second heartbeat during silent subprocess startup,
+- streamed trainer stdout/stderr; diagnostic heartbeat after 30 s of real silence,
 - `last.pt` resume staging from Drive with byte progress,
 - `best.pt`, `last.pt`, numbered checkpoints and `metrics.jsonl`,
 - ONNX export after training,
@@ -40,7 +40,7 @@ The notebook follows the same pattern as the `resistor_model` Colab trainers:
 
 Persistent output:
 
-`MyDrive/head_model/headscan-lite-headspace/`
+`MyDrive/head_model/headscan-lite-makehuman-2500/`
 
 ## Request-free MakeHuman synthetic setup
 
@@ -90,6 +90,26 @@ filename, for example:
 
 Later Colab sessions restore this prepared cache locally rather than generating
 the dataset again.
+
+The training dataset ZIP is **already saved after synthesis** and restored on
+the next run, including the previously generated
+`makehuman_synth_v1_2500ids_8views_320px.zip` (no regeneration).
+
+New runs also write a separate, resumable **partial ZIP** after every
+`SYNTH_SNAPSHOT_EVERY` identities (default: 500):
+
+`MyDrive/head_model/makehuman_synth_v1_2500ids_8views_320px.partial.zip`
+
+Both complete and partial ZIPs are created locally and then uploaded via a
+temporary Drive file before atomically replacing the previous valid cache.
+If Colab ends mid-generation, the partial ZIP is restored and complete
+identity records/images/meshes are reused. After the final complete ZIP is
+written, the obsolete partial ZIP is removed. Complete caches take priority.
+
+Progress includes identity/view counts, rate, ETA, compressed ZIP packing and
+copy/restore progress, PCA mesh-loading progress, GPU PCA stages, training batch
+loss/vertex error and ETA. Trainer output is streamed directly into the
+notebook rather than printing repeated five-second heartbeats.
 
 Persistent training outputs go to:
 

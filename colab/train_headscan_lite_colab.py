@@ -30,7 +30,7 @@ import sys
 import time
 import zipfile
 
-HEADSCAN_COLAB_VERSION = "2026-10-16-v4-makehuman-import-fix"
+HEADSCAN_COLAB_VERSION = "2026-10-16-v5-progress-cache"
 # Kept so already-open v3 notebook bootstrap cells accept this compatible update.
 COLAB_COMPATIBILITY_TOKENS = ("v3-makehuman",)
 
@@ -41,6 +41,7 @@ SYNTH_VIEWS = 8
 SYNTH_IMAGE_SIZE = 320
 SYNTH_VALIDATION_FRACTION = 0.10
 SYNTH_SEED = 42
+SYNTH_SNAPSHOT_EVERY = 500  # Restartable intermediate ZIP every 500 identities.
 
 IMAGE_SIZE = 256
 MAX_VIEWS = 8
@@ -71,6 +72,7 @@ DRIVE_ROOT = DRIVE_MOUNT / "MyDrive" / "head_model"
 
 CACHE_TAG = f"v1_{SYNTH_IDENTITIES}ids_{SYNTH_VIEWS}views_{SYNTH_IMAGE_SIZE}px"
 MAKEHUMAN_CACHE_ZIP = DRIVE_ROOT / f"makehuman_synth_{CACHE_TAG}.zip"
+MAKEHUMAN_PARTIAL_ZIP = DRIVE_ROOT / f"makehuman_synth_{CACHE_TAG}.partial.zip"
 REAL_RUN_DIR = DRIVE_ROOT / f"headscan-lite-makehuman-{SYNTH_IDENTITIES}"
 
 
@@ -229,52 +231,206 @@ def install_dependencies() -> None:
 
 
 def _prepared_ok(root: Path) -> bool:
-    return (
-        (root / "train.jsonl").is_file()
-        and (root / "valid.jsonl").is_file()
-        and (root / "makehuman_generation.json").is_file()
-        and (root / "head_faces.npy").is_file()
+    """Check complete restored cache, including settings and sample files."""
+    try:
+        required = ("train.jsonl", "valid.jsonl", "makehuman_generation.json", "head_faces.npy")
+        if any(not (root / name).is_file() for name in required):
+            return False
+        report = json.loads((root / "makehuman_generation.json").read_text(encoding="utf-8"))
+        if (
+            report.get("identities") != SYNTH_IDENTITIES
+            or report.get("views_per_identity") != SYNTH_VIEWS
+            or report.get("image_size") != SYNTH_IMAGE_SIZE
+        ):
+            return False
+        for split in ("train", "valid"):
+            path = root / f"{split}.jsonl"
+            with path.open("r", encoding="utf-8") as handle:
+                first = next((json.loads(line) for line in handle if line.strip()), None)
+            if first is None:
+                return False
+            files = [root / first["vertices"]]
+            for view in first["views"]:
+                files.append(root / view["image"])
+                files.append(root / view["mask"])
+            if any(not item.is_file() or item.stat().st_size == 0 for item in files):
+                return False
+        return True
+    except (OSError, KeyError, TypeError, ValueError, StopIteration):
+        return False
+
+
+def _zip_local_dataset(root: Path, destination: Path, label: str) -> None:
+    """Write a restart-safe ZIP with explicit packing progress, without extra copies."""
+    started = time.monotonic()
+    files = [path for path in root.rglob("*") if path.is_file()]
+    total_files = len(files)
+    total_bytes = sum(path.stat().st_size for path in files)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = destination.with_suffix(destination.suffix + ".tmp")
+    if temporary.exists():
+        temporary.unlink()
+    print(
+        f"[{label}] packing {total_files} files | "
+        f"{total_bytes/1024/1024:.1f} MiB source",
+        flush=True,
+    )
+    try:
+        with zipfile.ZipFile(
+            temporary, "w", compression=zipfile.ZIP_DEFLATED,
+            compresslevel=1, allowZip64=True,
+        ) as archive:
+            for i, path in enumerate(files, 1):
+                archive.write(path, arcname=str(path.relative_to(root)))
+                if i % 1000 == 0 or i == total_files:
+                    elapsed = max(time.monotonic() - started, 1e-6)
+                    eta = elapsed / i * (total_files - i)
+                    print(
+                        f"[{label}] {i}/{total_files} files "
+                        f"({100*i/max(1,total_files):.1f}%) | "
+                        f"elapsed {elapsed:.0f}s | ETA {eta:.0f}s",
+                        flush=True,
+                    )
+        temporary.replace(destination)
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
+    print(
+        f"[{label}] ZIP ready: {destination.stat().st_size/1024/1024:.1f} MiB",
+        flush=True,
     )
 
 
-def restore_prepared_cache() -> Path | None:
-    if not MAKEHUMAN_CACHE_ZIP.is_file():
+def _atomic_drive_copy(source: Path, destination: Path, label: str) -> None:
+    """Never replace a good Drive cache with a half-copied ZIP."""
+    temp = destination.with_suffix(destination.suffix + ".uploading")
+    try:
+        copy_with_progress(source, temp, label)
+        if temp.stat().st_size != source.stat().st_size:
+            raise IOError(f"Incomplete cache upload: {temp}")
+        temp.replace(destination)
+    except BaseException:
+        temp.unlink(missing_ok=True)
+        raise
+    print(f"[{label}] Drive ZIP saved atomically: {destination}", flush=True)
+
+
+def _restore_archive(source: Path, *, complete: bool) -> Path | None:
+    if not source.is_file():
         return None
     if LOCAL_PREPARED.exists():
         shutil.rmtree(LOCAL_PREPARED)
     LOCAL_PREPARED.mkdir(parents=True, exist_ok=True)
-    local_zip = WORK / MAKEHUMAN_CACHE_ZIP.name
-    copy_with_progress(MAKEHUMAN_CACHE_ZIP, local_zip, "dataset-cache-copy")
-    print("[dataset-cache] extracting prepared MakeHuman dataset...", flush=True)
-    with zipfile.ZipFile(local_zip) as archive:
-        archive.extractall(LOCAL_PREPARED)
-    if not _prepared_ok(LOCAL_PREPARED):
-        print("[dataset-cache] cache incomplete; rebuilding.", flush=True)
-        shutil.rmtree(LOCAL_PREPARED)
-        return None
-    report = json.loads(
-        (LOCAL_PREPARED / "makehuman_generation.json").read_text(encoding="utf-8")
-    )
+    local_zip = WORK / source.name
     print(
-        f"[dataset-cache] ready | identities={report.get('identities')} | "
-        f"train={report.get('train_subjects')} | valid={report.get('valid_subjects')}",
+        f"[dataset-cache] Found {'complete' if complete else 'partial'} "
+        f"Drive ZIP: {source}",
         flush=True,
     )
-    return LOCAL_PREPARED
+    try:
+        copy_with_progress(source, local_zip, "dataset-cache-copy")
+        started = time.monotonic()
+        with zipfile.ZipFile(local_zip) as archive:
+            bad = archive.testzip()
+            if bad is not None:
+                raise zipfile.BadZipFile(f"CRC mismatch: {bad}")
+            members = archive.infolist()
+            total = len(members)
+            for i, member in enumerate(members, 1):
+                target = (LOCAL_PREPARED / member.filename).resolve()
+                if not target.is_relative_to(LOCAL_PREPARED.resolve()):
+                    raise zipfile.BadZipFile(f"unsafe ZIP path: {member.filename}")
+                archive.extract(member, LOCAL_PREPARED)
+                if i % 2000 == 0 or i == total:
+                    elapsed = max(time.monotonic() - started, 1e-6)
+                    eta = elapsed * (total - i) / max(1, i)
+                    print(
+                        f"[dataset-cache-restore] {i}/{total} files "
+                        f"({100*i/max(1,total):.1f}%) | "
+                        f"elapsed {elapsed:.0f}s | ETA {eta:.0f}s",
+                        flush=True,
+                    )
+        if complete:
+            if not _prepared_ok(LOCAL_PREPARED):
+                raise ValueError("restored full dataset does not match expected settings/files")
+            report = json.loads(
+                (LOCAL_PREPARED / "makehuman_generation.json").read_text(encoding="utf-8")
+            )
+            print(
+                f"[dataset-cache] RESTORED complete dataset: "
+                f"{report['identities']} identities, "
+                f"{report['train_subjects']} train, "
+                f"{report['valid_subjects']} validation | "
+                "no regeneration required",
+                flush=True,
+            )
+        else:
+            progress_path = LOCAL_PREPARED / ".partial-progress.json"
+            if not progress_path.is_file():
+                raise ValueError("partial dataset snapshot lacks progress metadata")
+            data = json.loads(progress_path.read_text(encoding="utf-8"))
+            if data.get("cache_tag") != CACHE_TAG or data.get("seed") != SYNTH_SEED:
+                raise ValueError("partial dataset settings mismatch")
+            completed = len(list((LOCAL_PREPARED / "records").glob("mh_*.json")))
+            if completed == 0:
+                raise ValueError("partial snapshot contains no completed identities")
+            print(
+                f"[dataset-cache] RESTORED partial dataset: "
+                f"{completed}/{SYNTH_IDENTITIES} record(s) found; "
+                "generation will skip complete restored identities",
+                flush=True,
+            )
+        return LOCAL_PREPARED
+    except (OSError, ValueError, zipfile.BadZipFile) as exc:
+        print(
+            f"[dataset-cache] restore rejected ({type(exc).__name__}: {exc}); "
+            "will use the next available source",
+            flush=True,
+        )
+        shutil.rmtree(LOCAL_PREPARED, ignore_errors=True)
+        return None
+    finally:
+        local_zip.unlink(missing_ok=True)
+
+
+def restore_prepared_cache() -> Path | None:
+    return _restore_archive(MAKEHUMAN_CACHE_ZIP, complete=True)
+
+
+def restore_partial_cache() -> Path | None:
+    return _restore_archive(MAKEHUMAN_PARTIAL_ZIP, complete=False)
+
+
+def save_partial_cache(root: Path, completed: int, total: int) -> None:
+    (root / ".partial-progress.json").write_text(
+        json.dumps(
+            {"cache_tag": CACHE_TAG, "seed": SYNTH_SEED, "completed": completed, "total": total}
+        ),
+        encoding="utf-8",
+    )
+    local_zip = WORK / f"makehuman_synth_{CACHE_TAG}.partial.zip"
+    _zip_local_dataset(root, local_zip, "dataset-snapshot-pack")
+    _atomic_drive_copy(local_zip, MAKEHUMAN_PARTIAL_ZIP, "dataset-snapshot-save")
+    local_zip.unlink(missing_ok=True)
+    print(
+        f"[dataset-snapshot] {completed}/{total} identities backed up; "
+        "a new Colab session can resume generation",
+        flush=True,
+    )
 
 
 def save_prepared_cache(root: Path) -> None:
     local_zip = WORK / MAKEHUMAN_CACHE_ZIP.name
-    if local_zip.exists():
-        local_zip.unlink()
-    print("[dataset-cache] packing generated dataset for later sessions...", flush=True)
-    shutil.make_archive(
-        str(local_zip.with_suffix("")),
-        "zip",
-        root_dir=root,
+    print("[dataset-cache] packing completed synthetic dataset for later sessions...", flush=True)
+    _zip_local_dataset(root, local_zip, "dataset-cache-pack")
+    _atomic_drive_copy(local_zip, MAKEHUMAN_CACHE_ZIP, "dataset-cache-save")
+    local_zip.unlink(missing_ok=True)
+    # The full ZIP is now safely committed. No need to retain a stale partial.
+    MAKEHUMAN_PARTIAL_ZIP.unlink(missing_ok=True)
+    print(
+        f"[dataset-cache] complete dataset persisted in Drive: {MAKEHUMAN_CACHE_ZIP}",
+        flush=True,
     )
-    copy_with_progress(local_zip, MAKEHUMAN_CACHE_ZIP, "dataset-cache-save")
-    print(f"[dataset-cache] saved: {MAKEHUMAN_CACHE_ZIP}", flush=True)
 
 
 def clone_makehuman_cc0_assets() -> tuple[Path, str]:

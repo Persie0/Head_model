@@ -21,6 +21,8 @@ The Colab recipe:
 from __future__ import annotations
 
 from pathlib import Path
+import importlib
+import importlib.util
 import json
 import shutil
 import subprocess
@@ -28,7 +30,7 @@ import sys
 import time
 import zipfile
 
-HEADSCAN_COLAB_VERSION = "2026-10-06-v3-makehuman"
+HEADSCAN_COLAB_VERSION = "2026-10-16-v4-makehuman-import-fix"
 
 # Free-Colab-oriented defaults. Increase SYNTH_IDENTITIES on later runs after
 # validating the pipeline. Changing it automatically uses a different cache.
@@ -178,6 +180,38 @@ def clone_repo() -> None:
     ])
 
 
+def activate_repo_import_path() -> None:
+    """Make the editable src-layout package visible in the live Colab kernel.
+
+    pip is launched in a subprocess. For a PEP 660 editable install it writes a
+    .pth file into site-packages, but Python processes .pth files only during
+    interpreter startup. The notebook kernel is already running, so explicitly
+    prepend the repository's src directory instead of requiring a runtime
+    restart.
+    """
+    src_dir = (REPO / "src").resolve()
+    package_dir = src_dir / "head_model"
+    if not package_dir.is_dir():
+        raise RuntimeError(
+            f"Expected Head_model package directory is missing: {package_dir}"
+        )
+    src_text = str(src_dir)
+    if src_text not in sys.path:
+        sys.path.insert(0, src_text)
+    importlib.invalidate_caches()
+
+    spec = importlib.util.find_spec("head_model")
+    if spec is None:
+        raise RuntimeError(
+            "Head_model was installed but the live Colab kernel still cannot "
+            f"resolve it. Added source path: {src_dir}. sys.path={sys.path[:6]}"
+        )
+    print(
+        f"[python-path] head_model import ready: {spec.origin}",
+        flush=True,
+    )
+
+
 def install_dependencies() -> None:
     run([sys.executable, "-m", "pip", "install", "-q", "--upgrade", "pip"])
     run([
@@ -189,6 +223,7 @@ def install_dependencies() -> None:
         "-e",
         f"{REPO}[train,export]",
     ])
+    activate_repo_import_path()
 
 
 def _prepared_ok(root: Path) -> bool:

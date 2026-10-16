@@ -461,8 +461,7 @@ def train(args: argparse.Namespace) -> dict[str, float]:
                     f"vertex {running_vertex/max(1,batches):.2f} mm | "
                     f"lr {optimizer.param_groups[0]['lr']:.2e} | "
                     f"elapsed {(time.perf_counter()-epoch_started)/60:.1f}m | "
-                    f"ETA {(time.perf_counter()-epoch_started)*"
-                    f"(total_batches-batch_index)/max(1,batch_index)/60:.1f}m",
+                    f"ETA {(time.perf_counter()-epoch_started)*(total_batches-batch_index)/max(1,batch_index)/60:.1f}m",
                     flush=True,
                 )
 
@@ -554,8 +553,7 @@ def train(args: argparse.Namespace) -> dict[str, float]:
             f"vertex {validation['vertex_mae_mm']:.2f} mm | "
             f"p95 {validation['vertex_p95_mm']:.2f} mm | "
             f"elapsed {elapsed/60:.1f}m | "
-            f"total training ETA {(time.perf_counter()-all_started)*"
-            f"(args.epochs-completed)/max(1,completed-start_epoch)/60:.1f}m",
+            f"total training ETA {(time.perf_counter()-all_started)*(args.epochs-completed)/max(1,completed-start_epoch)/60:.1f}m",
             flush=True,
         )
 

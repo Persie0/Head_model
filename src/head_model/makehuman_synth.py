@@ -5,7 +5,8 @@ import math
 from pathlib import Path
 import random
 import re
-from typing import Iterable
+import time
+from typing import Callable, Iterable
 
 import cv2
 import numpy as np
@@ -553,19 +554,41 @@ def generate_makehuman_dataset(
     validation_fraction: float = 0.10,
     seed: int = 42,
     progress_every: int = 25,
+    snapshot_every: int = 0,
+    on_snapshot: Callable[[Path, int, int], None] | None = None,
 ) -> dict[str, object]:
     output_root = Path(output_root)
     output_root.mkdir(parents=True, exist_ok=True)
     records_dir = output_root / "records"
     records_dir.mkdir(parents=True, exist_ok=True)
 
+    print("[makehuman] preparing base mesh, target morphs and head topology...", flush=True)
+    prep_started = time.monotonic()
     assets = prepare_makehuman_assets(makehuman_root)
+    print(
+        f"[makehuman] morphs ready | head vertices={len(assets['head_full_indices'])} | "
+        f"faces={len(assets['head_faces'])} | {time.monotonic()-prep_started:.1f}s",
+        flush=True,
+    )
     records: list[dict[str, object]] = []
+    started = time.monotonic()
+    restored = 0
     for index in range(int(identities)):
         record_path = records_dir / f"mh_{index:06d}.json"
+        row = None
         if record_path.is_file():
-            row = json.loads(record_path.read_text(encoding="utf-8"))
-        else:
+            try:
+                candidate = json.loads(record_path.read_text(encoding="utf-8"))
+                required = [output_root / candidate["vertices"]]
+                for view in candidate["views"]:
+                    required.append(output_root / view["image"])
+                    required.append(output_root / view["mask"])
+                if len(candidate["views"]) == views_per_identity and all(p.is_file() and p.stat().st_size > 0 for p in required):
+                    row = candidate
+                    restored += 1
+            except (OSError, ValueError, KeyError, TypeError):
+                pass
+        if row is None:
             row = generate_identity(
                 assets,
                 identity_index=index,
@@ -574,14 +597,33 @@ def generate_makehuman_dataset(
                 image_size=image_size,
                 seed=seed,
             )
-            record_path.write_text(json.dumps(row), encoding="utf-8")
+            temp_record = record_path.with_suffix(".json.tmp")
+            temp_record.write_text(json.dumps(row), encoding="utf-8")
+            temp_record.replace(record_path)
         records.append(row)
-        if (index + 1) % max(1, progress_every) == 0 or index + 1 == identities:
+        completed = index + 1
+        if completed % max(1, progress_every) == 0 or completed == identities:
+            elapsed = max(time.monotonic() - started, 1e-6)
+            per_second = completed / elapsed
+            eta = (int(identities) - completed) / max(per_second, 1e-6)
             print(
-                f"[makehuman] generated {index+1}/{identities} identities "
-                f"({100.0*(index+1)/max(1,identities):.1f}%)",
+                f"[makehuman] {completed}/{identities} identities "
+                f"({100.0*completed/max(1,identities):.1f}%) | "
+                f"views {completed*views_per_identity}/{int(identities)*views_per_identity} | "
+                f"restored {restored} | {per_second:.2f} id/s | "
+                f"elapsed {elapsed/60:.1f}m | ETA {eta/60:.1f}m",
                 flush=True,
             )
+        if (
+            on_snapshot is not None and snapshot_every > 0
+            and completed % snapshot_every == 0 and completed < identities
+        ):
+            print(
+                f"[makehuman] saving resumable partial ZIP at "
+                f"{completed}/{identities} identities...",
+                flush=True,
+            )
+            on_snapshot(output_root, completed, int(identities))
 
     rng = random.Random(seed)
     order = list(range(len(records)))

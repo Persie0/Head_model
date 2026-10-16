@@ -4,6 +4,7 @@ import json
 import math
 from pathlib import Path
 import random
+import time
 from typing import Any
 
 import numpy as np
@@ -50,10 +51,13 @@ def build_shape_basis(
 ) -> Path:
     manifest_path = Path(manifest_path)
     root = manifest_path.parent
+    started = time.monotonic()
+    print(f"[basis] reading manifest {manifest_path}...", flush=True)
     records = read_manifest(manifest_path)
+    print(f"[basis] loading {len(records)} registered training meshes...", flush=True)
     meshes = []
     vertex_count = None
-    for row in records:
+    for row_index, row in enumerate(records, 1):
         vertices = np.load(resolve_path(root, row["vertices"])).astype(np.float32)
         if vertices.ndim != 2 or vertices.shape[1] != 3:
             raise ValueError(f"{row['vertices']}: vertices must be [V,3]")
@@ -62,7 +66,17 @@ def build_shape_basis(
         elif vertices.shape[0] != vertex_count:
             raise ValueError("all registered meshes must have identical vertex count/topology")
         meshes.append(vertices)
+        if row_index % 100 == 0 or row_index == len(records):
+            elapsed = max(time.monotonic()-started, 1e-6)
+            eta = elapsed / row_index * (len(records)-row_index)
+            print(
+                f"[basis-load] {row_index}/{len(records)} meshes "
+                f"({100*row_index/len(records):.1f}%) | "
+                f"elapsed {elapsed:.1f}s | ETA {eta:.1f}s",
+                flush=True,
+            )
 
+    print("[basis] centering vertices and preparing PCA input...", flush=True)
     x = np.stack(meshes, axis=0)
     mean = x.mean(axis=0, keepdims=True)
     flat = (x - mean).reshape(len(x), -1).astype(np.float32, copy=False)
@@ -79,14 +93,26 @@ def build_shape_basis(
             f"components={max_components} | device={device}",
             flush=True,
         )
+        print(
+            f"[basis] GPU matrix transfer: {flat.nbytes/1024/1024:.1f} MiB | "
+            f"rank={q}; decomposition follows",
+            flush=True,
+        )
         torch.manual_seed(42)
         matrix = torch.from_numpy(flat).to(device)
         with torch.no_grad():
+            pca_started = time.monotonic()
+            print("[basis] randomized GPU PCA running (may be the longest startup step)...", flush=True)
             _, singular_t, vectors = torch.pca_lowrank(
                 matrix,
                 q=q,
                 center=False,
                 niter=3,
+            )
+            print(
+                f"[basis] randomized GPU PCA finished in "
+                f"{time.monotonic()-pca_started:.1f}s",
+                flush=True,
             )
         comp_flat = (
             vectors[:, :max_components]
@@ -109,12 +135,18 @@ def build_shape_basis(
     coeff_std = np.maximum(coeff_std, 1e-4)
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    print(f"[basis] saving {max_components} components to {output_path}...", flush=True)
     np.savez_compressed(
         output_path,
         mean=mean[0].astype(np.float32),
         components=comp_flat.reshape(max_components, vertex_count, 3),
         coeff_std=coeff_std,
         explained_singular_values=singular[:max_components].astype(np.float32),
+    )
+    print(
+        f"[basis] ready | elapsed {(time.monotonic()-started)/60:.1f} min | "
+        f"file {output_path.stat().st_size/1024/1024:.1f} MiB",
+        flush=True,
     )
     return output_path
 

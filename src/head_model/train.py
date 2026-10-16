@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+# This line precedes heavy torch/torchvision imports, so the Colab log reports
+# which startup stage is active instead of a long blank interval.
+print("[startup] trainer module launched; importing PyTorch / torchvision...", flush=True)
+
 import argparse
 import json
 from pathlib import Path
@@ -13,6 +17,8 @@ from torch.utils.data import DataLoader
 
 from .data import RegisteredHeadDataset, build_shape_basis
 from .model import HeadScanLite, load_shape_basis
+
+print("[startup] libraries imported; preparing training configuration...", flush=True)
 
 
 def seed_everything(seed: int) -> None:
@@ -250,6 +256,7 @@ def save_checkpoint(
 
 
 def train(args: argparse.Namespace) -> dict[str, float]:
+    print("[setup] setting random seeds and detecting GPU...", flush=True)
     seed_everything(args.seed)
     device = torch.device(
         "cuda" if torch.cuda.is_available() and not args.cpu else "cpu"
@@ -268,6 +275,7 @@ def train(args: argparse.Namespace) -> dict[str, float]:
             args.basis_path,
             components=args.shape_components,
         )
+    print("[basis] loading cached or newly generated shape basis...", flush=True)
     basis = load_shape_basis(args.basis_path)
     print(
         f"[basis] vertices={basis.vertex_count} | "
@@ -276,6 +284,7 @@ def train(args: argparse.Namespace) -> dict[str, float]:
         flush=True,
     )
 
+    print("[setup] reading training and validation manifests...", flush=True)
     train_dataset = RegisteredHeadDataset(
         args.train_manifest,
         args.basis_path,
@@ -311,6 +320,7 @@ def train(args: argparse.Namespace) -> dict[str, float]:
         device=device,
     )
 
+    print("[setup] constructing MobileNetV3, transformer and dense heads...", flush=True)
     model = HeadScanLite(
         basis,
         token_dim=args.token_dim,
@@ -318,6 +328,7 @@ def train(args: argparse.Namespace) -> dict[str, float]:
         transformer_heads=args.transformer_heads,
         pretrained_backbone=args.pretrained_backbone,
     ).to(device)
+    print("[setup] network allocated; configuring optimizer, scheduler and AMP...", flush=True)
     optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=args.lr,
@@ -391,6 +402,7 @@ def train(args: argparse.Namespace) -> dict[str, float]:
     )
 
     metrics_path = output_dir / "metrics.jsonl"
+    all_started = time.perf_counter()
     for epoch in range(start_epoch, args.epochs):
         completed = epoch + 1
         print(
@@ -448,7 +460,9 @@ def train(args: argparse.Namespace) -> dict[str, float]:
                     f"loss {running_loss/max(1,batches):.4f} | "
                     f"vertex {running_vertex/max(1,batches):.2f} mm | "
                     f"lr {optimizer.param_groups[0]['lr']:.2e} | "
-                    f"{time.perf_counter()-epoch_started:.1f}s",
+                    f"elapsed {(time.perf_counter()-epoch_started)/60:.1f}m | "
+                    f"ETA {(time.perf_counter()-epoch_started)*"
+                    f"(total_batches-batch_index)/max(1,batch_index)/60:.1f}m",
                     flush=True,
                 )
 
@@ -539,7 +553,9 @@ def train(args: argparse.Namespace) -> dict[str, float]:
             f"val loss {validation['loss']:.4f} | "
             f"vertex {validation['vertex_mae_mm']:.2f} mm | "
             f"p95 {validation['vertex_p95_mm']:.2f} mm | "
-            f"{elapsed:.1f}s",
+            f"elapsed {elapsed/60:.1f}m | "
+            f"total training ETA {(time.perf_counter()-all_started)*"
+            f"(args.epochs-completed)/max(1,completed-start_epoch)/60:.1f}m",
             flush=True,
         )
 
